@@ -1395,20 +1395,24 @@ function fmtET(fx) {
 }
 
 /* ================= FIXTURE CARD ================= */
-function FixtureCard({ fx, pred, onPredict, goalScoring }) {
+function FixtureCard({ fx, pred, onPredict, goalScoring, readOnly = false }) {
   const kicked = !fx.tba && Date.now() >= new Date(fx.kickoff).getTime();
-  const isLocked = kicked || fx.final || !!fx.result;
+  const manuallyLocked = !!pred?.locked;
+  const isLocked = readOnly || kicked || fx.final || !!fx.result || manuallyLocked;
   const res = fx.result;
   const scored = fx.final && res ? scorePrediction(pred, res, goalScoring) : null;
   const pickFromGoals = pred && Number.isInteger(pred.h) && Number.isInteger(pred.a) ? outcomeOf(pred.h, pred.a) : pred?.pick;
   const set = (patch) => onPredict({ ...(pred || {}), ...patch });
+  const hasFullPick = goalScoring ? (pred?.h != null && pred?.a != null) : !!pred?.pick;
+  const canLockNow = !readOnly && !kicked && !fx.final && !manuallyLocked && hasFullPick;
 
   return (
     <div style={{ background: T.card, border: `1px solid ${isLocked && !fx.final ? T.pink + "55" : T.line}`, borderRadius: 14, padding: "16px 18px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8 }}>
         <span style={{ fontSize: 12, color: T.dim }}>{fmtET(fx)}</span>
         {fx.final ? <Pill color="#0A0A0A" bg={T.volt} border={T.volt}>FT {res.h}–{res.a}</Pill>
-          : isLocked ? <Pill color={T.pink} border={T.pink + "66"}><Lock size={10} style={{ display: "inline", marginRight: 4, verticalAlign: "-1px" }} />Locked</Pill>
+          : kicked ? <Pill color={T.pink} border={T.pink + "66"}><Lock size={10} style={{ display: "inline", marginRight: 4, verticalAlign: "-1px" }} />Locked</Pill>
+          : manuallyLocked ? <Pill color={T.gold} border={T.gold + "66"}><Lock size={10} style={{ display: "inline", marginRight: 4, verticalAlign: "-1px" }} />Locked in</Pill>
           : <Pill>Open</Pill>}
       </div>
 
@@ -1443,6 +1447,16 @@ function FixtureCard({ fx, pred, onPredict, goalScoring }) {
           );
         })}
       </div>
+
+      {canLockNow && (
+        <button onClick={() => set({ locked: true })}
+          style={{ marginTop: 10, width: "100%", padding: "8px 0", borderRadius: 8, cursor: "pointer",
+            fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 12.5,
+            background: "transparent", color: T.gold, border: `1px dashed ${T.gold}88` }}>
+          <Lock size={11} style={{ display: "inline", marginRight: 6, verticalAlign: "-1px" }} />
+          Lock this pick in
+        </button>
+      )}
 
       {scored && (
         <div style={{ marginTop: 12, padding: "8px 12px", borderRadius: 8, background: "#0D0220", border: `1px solid ${T.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1631,6 +1645,7 @@ const LB_SCOPES = { ALL: "Overall", PL: "Premier League", BUN: "Bundesliga", LIG
 function Leaderboard({ players, allPreds, fixtures, goalScoring, me }) {
   const [scope, setScope] = useState("ALL");
   const [mode, setMode] = useState("fair"); // "fair" = avg points per match · "total" = raw sum
+  const [viewing, setViewing] = useState(null); // player row currently open in the picks modal
   const comp = scope === "ALL" ? null : scope;
   const rows = useMemo(() => players.map((p) => ({
     u: p.u, name: p.name, clubs: p.clubs || (p.club ? { [COMP_OF[p.club] || "PL"]: p.club } : {}), ...computeStats(allPreds[p.u], fixtures, goalScoring, comp),
@@ -1676,7 +1691,7 @@ function Leaderboard({ players, allPreds, fixtures, goalScoring, me }) {
           <tbody>
             {rows.length === 0 && <tr><td colSpan={6} style={{ padding: 24, textAlign: "center", color: T.dim }}>No managers yet — invite your friends.</td></tr>}
             {rows.map((r, i) => (
-              <tr key={r.u} style={{ borderTop: `1px solid ${T.line}`, background: r.u === me.u ? T.volt + "0D" : "transparent" }}>
+              <tr key={r.u} onClick={() => setViewing(r)} style={{ borderTop: `1px solid ${T.line}`, background: r.u === me.u ? T.volt + "0D" : "transparent", cursor: "pointer" }}>
                 <td style={{ padding: "12px 20px", fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: i === 0 ? T.gold : T.dim }}>{i + 1}</td>
                 <td style={{ padding: "12px 8px", fontWeight: 600 }}>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -1691,6 +1706,63 @@ function Leaderboard({ players, allPreds, fixtures, goalScoring, me }) {
             ))}
           </tbody>
         </table>
+      </div>
+      {viewing && (
+        <PlayerPicksModal player={viewing} preds={allPreds[viewing.u] || {}} fixtures={fixtures} goalScoring={goalScoring} onClose={() => setViewing(null)} />
+      )}
+    </div>
+  );
+}
+
+const COMP_LABEL = { PL: "Premier League", BUN: "Bundesliga", LIGA: "La Liga", UCL: "Champions League", FAC: "FA Cup" };
+
+/* Read-only view of another manager's picks. A pick only shows once it's "revealed":
+   the match has kicked off / finished, or the manager chose to lock it in early.
+   This is a social/fun convention, not a security boundary — anyone with dev tools open
+   technically already has the raw data client-side, same as any other client-rendered app. */
+function PlayerPicksModal({ player, preds, fixtures, goalScoring, onClose }) {
+  const entries = Object.keys(preds || {});
+  const mine = fixtures.filter((f) => entries.includes(f.id)).sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
+  const revealed = mine.filter((f) => f.final || (!f.tba && Date.now() >= new Date(f.kickoff).getTime()) || preds[f.id]?.locked);
+  const hidden = mine.filter((f) => !revealed.includes(f));
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000000AA", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16, padding: 22, width: "100%", maxWidth: 560, maxHeight: "82vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <ClubRow clubs={player.clubs} size={28} />
+          <div style={{ flex: 1 }}>
+            <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", margin: 0, fontSize: 18 }}>{player.name}'s picks</h3>
+            <p style={{ margin: "2px 0 0", fontSize: 12, color: T.dim }}>@{player.u}</p>
+          </div>
+          <button onClick={onClose} style={{ ...btn(false), padding: "6px 10px" }}><X size={14} /></button>
+        </div>
+
+        {mine.length === 0 && <p style={{ color: T.dim, fontSize: 14, textAlign: "center", padding: "20px 0" }}>No picks made yet.</p>}
+
+        {revealed.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: hidden.length > 0 ? 18 : 0 }}>
+            {revealed.map((f) => (
+              <FixtureCard key={f.id} fx={f} pred={preds[f.id]} onPredict={() => {}} goalScoring={goalScoring} readOnly />
+            ))}
+          </div>
+        )}
+
+        {hidden.length > 0 && (
+          <div>
+            <p style={{ fontSize: 11, color: T.dim, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, margin: "0 0 8px" }}>
+              Not revealed yet ({hidden.length})
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {hidden.map((f) => (
+                <div key={f.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: "#0D0220", border: `1px solid ${T.line}`, borderRadius: 10, fontSize: 13 }}>
+                  <Crest team={f.home} size={20} /><span style={{ color: T.dim }}>{f.home} v {f.away}</span>
+                  <span style={{ marginLeft: "auto", color: T.dim, display: "flex", alignItems: "center", gap: 5 }}><Lock size={11} />{fmtET(f)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2045,6 +2117,46 @@ function AdminDesk({ config, setConfig, fixtures, setFixtures, players, allPreds
   );
 }
 
+/* ================= EDIT PROFILE (clubs & display name) ================= */
+function EditProfileModal({ me, onSaved, onClose }) {
+  const [name, setName] = useState(me.name);
+  const [clubs, setClubs] = useState(me.clubs || { PL: null, BUN: null, LIGA: null, UCL: null });
+  const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
+  const pick = (comp, team) => setClubs((prev) => ({ ...prev, [comp]: team }));
+
+  const save = async () => {
+    setErr("");
+    if (!name.trim()) { setErr("Display name can't be empty."); return; }
+    if (!clubs.PL || !clubs.BUN || !clubs.LIGA) { setErr("Pick a club in each of the three leagues."); return; }
+    setBusy(true);
+    const players = await sget("plp2:players", true, []);
+    const updated = players.map((p) => p.u === me.u ? { ...p, name: name.trim(), clubs } : p);
+    const ok = await sset("plp2:players", updated, true);
+    setBusy(false);
+    if (!ok) { setErr("Couldn't save — check the sync status pill and try again."); return; }
+    const nextMe = { ...me, name: name.trim(), clubs };
+    saveSession(nextMe);
+    onSaved(nextMe, updated);
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000000AA", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16, padding: 22, width: "100%", maxWidth: 460, maxHeight: "86vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+          <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", margin: 0, fontSize: 18 }}>Edit profile</h3>
+          <button onClick={onClose} style={{ ...btn(false), marginLeft: "auto", padding: "6px 10px" }}><X size={14} /></button>
+        </div>
+        <p style={{ fontSize: 12, color: T.dim, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>Display name</p>
+        <input value={name} onChange={(e) => setName(e.target.value)} style={{ ...inputStyle, width: "100%", marginBottom: 16 }} />
+        <p style={{ fontSize: 12, color: T.dim, margin: "0 0 8px", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>Your clubs</p>
+        <ClubPicker clubs={clubs} onPick={pick} />
+        {err && <p style={{ color: T.pink, fontSize: 13, margin: "10px 0 0" }}>{err}</p>}
+        <button onClick={save} disabled={busy} style={{ ...btn(true), width: "100%", marginTop: 16, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Save changes"}</button>
+      </div>
+    </div>
+  );
+}
+
 /* ================= APP ================= */
 export default function App() {
   const [ready, setReady] = useState(false);
@@ -2060,6 +2172,7 @@ export default function App() {
   const [pComp, setPComp] = useState("PL");
   const [tblComp, setTblComp] = useState("PL");
   const [admin, setAdmin] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pinOpen, setPinOpen] = useState(false);
@@ -2114,8 +2227,19 @@ export default function App() {
       const map = await loadShared();
       const saved = loadSession();
       if (saved) {
-        const migrated = saved.clubs ? saved : { ...saved, clubs: saved.club ? { [COMP_OF[saved.club] || "PL"]: saved.club } : { PL: null, BUN: null, LIGA: null, UCL: null } };
-        setMe(migrated); setMyPreds(map[saved.u] || {});
+        // Reconcile the cached session against the authoritative record in Firestore, so
+        // edits made in the database (name, clubs) always show up on next load without
+        // needing to sign out. Falls back to the cached copy if the player list didn't load.
+        let live = null;
+        try {
+          const players = await sget("plp2:players", true, []);
+          live = players.find((p) => p.u === saved.u) || null;
+        } catch {}
+        const base = live
+          ? { u: live.u, name: live.name, clubs: live.clubs || (live.club ? { [COMP_OF[live.club] || "PL"]: live.club } : { PL: null, BUN: null, LIGA: null, UCL: null }) }
+          : saved;
+        const migrated = base.clubs ? base : { ...base, clubs: base.club ? { [COMP_OF[base.club] || "PL"]: base.club } : { PL: null, BUN: null, LIGA: null, UCL: null } };
+        setMe(migrated); saveSession(migrated); setMyPreds(map[saved.u] || {});
       }
       setReady(true);
       // Probe the sync backend so the header can show a truthful status.
@@ -2200,7 +2324,7 @@ export default function App() {
               {sync.state === "ok" ? "Cloud synced" : sync.state === "down" ? "Local only" : "Checking…"}
             </span>
             <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 13, color: T.dim, display: "inline-flex", alignItems: "center", gap: 6 }}><ClubRow clubs={me.clubs} size={20} />{me.name}</span>
+              <button onClick={() => setShowProfile(true)} title="Edit profile" style={{ background: "none", border: "none", cursor: "pointer", padding: "4px 6px", borderRadius: 8, fontSize: 13, color: T.dim, display: "inline-flex", alignItems: "center", gap: 6 }}><ClubRow clubs={me.clubs} size={20} />{me.name}</button>
               {me.u === ADMIN_USERNAME && (
                 <button onClick={openAdmin} title="Admin desk" style={{ ...btn(false), padding: "7px 10px", borderColor: admin ? T.pink : T.line, color: admin ? T.pink : T.dim }}><Settings size={15} /></button>
               )}
@@ -2271,6 +2395,10 @@ export default function App() {
                 <button onClick={submitPin} style={{ ...btn(true), width: "100%", marginTop: 12 }}>{config.adminPinHash ? "Unlock" : "Create & unlock"}</button>
               </div>
             </div>
+          )}
+
+          {showProfile && (
+            <EditProfileModal me={me} onClose={() => setShowProfile(false)} onSaved={(nextMe, updatedPlayers) => { setMe(nextMe); setPlayers(updatedPlayers); setShowProfile(false); }} />
           )}
 
           {dirty && (tab === "predict" || tab === "ucl") && (
