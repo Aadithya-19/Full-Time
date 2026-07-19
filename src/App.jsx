@@ -1208,13 +1208,14 @@ function scorePrediction(pred, result, goalScoring) {
   }
   return { pts, correctOutcome: pick === actual, exact };
 }
-function computeStats(preds, fixtures, goalScoring) {
+function computeStats(preds, fixtures, goalScoring, comp) {
   let pts = 0, correct = 0, exact = 0, played = 0;
-  fixtures.filter((f) => f.final && f.result).forEach((f) => {
+  fixtures.filter((f) => f.final && f.result && (!comp || f.comp === comp)).forEach((f) => {
     const s = scorePrediction(preds?.[f.id], f.result, goalScoring);
     if (s) { pts += s.pts; played++; if (s.correctOutcome) correct++; if (s.exact) exact++; }
   });
-  return { pts: Math.round(pts * 10) / 10, correct, exact, played };
+  const avg = played > 0 ? pts / played : 0;
+  return { pts: Math.round(pts * 10) / 10, correct, exact, played, avg: Math.round(avg * 100) / 100 };
 }
 
 /* ================= STORAGE + HASH =================
@@ -1626,17 +1627,39 @@ function HomeTab({ me, myPreds, allPreds, players, fixtures, goalScoring, tables
 }
 
 /* ================= LEADERBOARD ================= */
+const LB_SCOPES = { ALL: "Overall", PL: "Premier League", BUN: "Bundesliga", LIGA: "La Liga", UCL: "Champions League", FAC: "FA Cup" };
 function Leaderboard({ players, allPreds, fixtures, goalScoring, me }) {
+  const [scope, setScope] = useState("ALL");
+  const [mode, setMode] = useState("fair"); // "fair" = avg points per match · "total" = raw sum
+  const comp = scope === "ALL" ? null : scope;
   const rows = useMemo(() => players.map((p) => ({
-    u: p.u, name: p.name, clubs: p.clubs || (p.club ? { [COMP_OF[p.club] || "PL"]: p.club } : {}), ...computeStats(allPreds[p.u], fixtures, goalScoring),
-  })).sort((a, b) => b.pts - a.pts || b.exact - a.exact || b.correct - a.correct), [players, allPreds, fixtures, goalScoring]);
+    u: p.u, name: p.name, clubs: p.clubs || (p.club ? { [COMP_OF[p.club] || "PL"]: p.club } : {}), ...computeStats(allPreds[p.u], fixtures, goalScoring, comp),
+  })).sort((a, b) => {
+    if (mode === "fair") return b.avg - a.avg || b.played - a.played || b.exact - a.exact;
+    return b.pts - a.pts || b.exact - a.exact || b.correct - a.correct;
+  }), [players, allPreds, fixtures, goalScoring, comp, mode]);
 
   return (
     <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16, overflow: "hidden" }}>
-      <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.line}`, display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ padding: "16px 20px", borderBottom: `1px solid ${T.line}`, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
         <Trophy size={18} color={T.gold} />
         <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, margin: 0 }}>Leaderboard</h2>
-        <span style={{ marginLeft: "auto", fontSize: 12, color: T.dim }}>Updates as results go final</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {Object.entries(LB_SCOPES).map(([k, l]) => (
+            <button key={k} onClick={() => setScope(k)} style={{ ...btn(scope === k), padding: "5px 10px", fontSize: 12 }}>{l}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ padding: "10px 20px", borderBottom: `1px solid ${T.line}`, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => setMode("fair")} style={{ ...btn(mode === "fair"), padding: "5px 12px", fontSize: 12 }}>Fair (avg / match)</button>
+          <button onClick={() => setMode("total")} style={{ ...btn(mode === "total"), padding: "5px 12px", fontSize: 12 }}>Total points</button>
+        </div>
+        <span style={{ fontSize: 12, color: T.dim, flex: 1, minWidth: 200 }}>
+          {mode === "fair"
+            ? "Ranked by average points per match predicted — skipping a league costs you nothing."
+            : "Ranked by raw total points across all predictions."}
+        </span>
       </div>
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14, minWidth: 480 }}>
@@ -1645,9 +1668,9 @@ function Leaderboard({ players, allPreds, fixtures, goalScoring, me }) {
               <th style={{ textAlign: "left", padding: "10px 20px" }}>#</th>
               <th style={{ textAlign: "left", padding: "10px 8px" }}>Manager</th>
               <th style={{ padding: "10px 8px" }}>Scored</th>
-              <th style={{ padding: "10px 8px" }}>Outcomes</th>
               <th style={{ padding: "10px 8px" }}>Exact</th>
-              <th style={{ textAlign: "right", padding: "10px 20px" }}>Pts</th>
+              <th style={{ padding: "10px 8px" }}>Total</th>
+              <th style={{ textAlign: "right", padding: "10px 20px" }}>{mode === "fair" ? "Avg" : "Pts"}</th>
             </tr>
           </thead>
           <tbody>
@@ -1661,9 +1684,9 @@ function Leaderboard({ players, allPreds, fixtures, goalScoring, me }) {
                   </span>
                 </td>
                 <td style={{ padding: "12px 8px", textAlign: "center", color: T.dim }}>{r.played}</td>
-                <td style={{ padding: "12px 8px", textAlign: "center", color: T.dim }}>{r.correct}</td>
                 <td style={{ padding: "12px 8px", textAlign: "center", color: T.gold }}>{r.exact}</td>
-                <td style={{ padding: "12px 20px", textAlign: "right", fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: T.volt }}>{r.pts}</td>
+                <td style={{ padding: "12px 8px", textAlign: "center", color: T.dim }}>{r.pts}</td>
+                <td style={{ padding: "12px 20px", textAlign: "right", fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: T.volt }}>{mode === "fair" ? (r.played > 0 ? r.avg.toFixed(2) : "–") : r.pts}</td>
               </tr>
             ))}
           </tbody>
@@ -2070,7 +2093,7 @@ export default function App() {
     if (!players.some((p) => p.u === ADMIN_USERNAME)) {
       const rec = {
         u: ADMIN_USERNAME, name: "Aadithya", hash: await hash("ChelseaLion"),
-        clubs: { PL: "Chelsea", BUN: "Bayern Munich", LIGA: "Real Madrid", UCL: "AC Milan" },
+        clubs: { PL: "Chelsea", BUN: "Dortmund", LIGA: "Barcelona", UCL: null },
         joined: Date.now(),
       };
       players = [...players, rec];
