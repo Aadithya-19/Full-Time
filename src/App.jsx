@@ -1274,6 +1274,22 @@ async function slistKeys(prefix, shared) {
   if (remote !== undefined) return remote;
   try { const r = await window.storage.list(prefix, shared); return r?.keys || []; } catch { return []; }
 }
+
+/* Login session is a per-browser concern — keep it in localStorage so it survives refreshes
+   instantly and never depends on a server round-trip. Falls back to an in-memory value if
+   localStorage is unavailable (e.g. a locked-down artifact sandbox). */
+let _memSession = null;
+function loadSession() {
+  try { const v = localStorage.getItem("ftl:session"); return v ? JSON.parse(v) : null; }
+  catch { return _memSession; }
+}
+function saveSession(obj) {
+  _memSession = obj;
+  try {
+    if (obj == null) localStorage.removeItem("ftl:session");
+    else localStorage.setItem("ftl:session", JSON.stringify(obj));
+  } catch {}
+}
 async function hash(text) {
   try {
     const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("plp-salt::" + text));
@@ -1462,13 +1478,13 @@ function Auth({ onAuthed }) {
       if (!clubs.PL || !clubs.BUN || !clubs.LIGA) { setErr("Pick a club in each of the three leagues — it powers your home page."); setBusy(false); return; }
       const rec = { u: uname, name: name.trim(), hash: h, clubs, joined: Date.now() };
       await sset("plp2:players", [...players, rec], true);
-      await sset("plp2:me", { u: uname, name: rec.name, clubs }, false);
+      saveSession({ u: uname, name: rec.name, clubs });
       onAuthed({ u: uname, name: rec.name, clubs });
     } else {
       if (!existing) { setErr("No account with that username — create one below."); setBusy(false); return; }
       if (existing.hash !== h) { setErr("Wrong password."); setBusy(false); return; }
       const eclubs = existing.clubs || (existing.club ? { [COMP_OF[existing.club] || "PL"]: existing.club } : { PL: null, BUN: null, LIGA: null, UCL: null });
-      await sset("plp2:me", { u: uname, name: existing.name, clubs: eclubs }, false);
+      saveSession({ u: uname, name: existing.name, clubs: eclubs });
       onAuthed({ u: uname, name: existing.name, clubs: eclubs });
     }
     setBusy(false);
@@ -2009,6 +2025,7 @@ function AdminDesk({ config, setConfig, fixtures, setFixtures, players, allPreds
 /* ================= APP ================= */
 export default function App() {
   const [ready, setReady] = useState(false);
+  const [sync, setSync] = useState({ state: "checking", detail: "" });
   const [me, setMe] = useState(null);
   const [players, setPlayers] = useState([]);
   const [config, setConfig] = useState({ goalScoring: true, knockoutsOpen: false, faCupOpen: false, adminPinHash: null });
@@ -2072,12 +2089,28 @@ export default function App() {
   useEffect(() => {
     (async () => {
       const map = await loadShared();
-      const saved = await sget("plp2:me", false, null);
+      const saved = loadSession();
       if (saved) {
         const migrated = saved.clubs ? saved : { ...saved, clubs: saved.club ? { [COMP_OF[saved.club] || "PL"]: saved.club } : { PL: null, BUN: null, LIGA: null, UCL: null } };
         setMe(migrated); setMyPreds(map[saved.u] || {});
       }
       setReady(true);
+      // Probe the sync backend so the header can show a truthful status.
+      (async () => {
+        try {
+          const h = await fetch("/api/db?action=health").then((r) => r.json());
+          if (!h.hasProjectId || !h.hasApiKey) {
+            setSync({ state: "down", detail: "Server is missing Firebase env vars in Vercel (FIREBASE_PROJECT_ID / FIREBASE_API_KEY)." });
+          } else {
+            // Round-trip a probe doc to confirm Firestore rules actually allow writes.
+            const wr = await fetch("/api/db", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shared: true, key: "plp2:__health", value: { t: Date.now() } }) }).then((r) => r.json());
+            if (wr.ok) setSync({ state: "ok", detail: "" });
+            else setSync({ state: "down", detail: `Firestore rejected a write (${wr.status || ""}). Check Firestore rules allow read, write. ${wr.detail || ""}`.trim() });
+          }
+        } catch (e) {
+          setSync({ state: "down", detail: "No /api/db route reachable — this build must run on Vercel (not a static host or artifact preview)." });
+        }
+      })();
     })();
   }, [loadShared]);
 
@@ -2087,7 +2120,7 @@ export default function App() {
     const pl = await sget("plp2:players", true, []); setPlayers(pl);
     setTab("home");
   };
-  const signOut = async () => { await sset("plp2:me", null, false); setMe(null); setAdmin(false); setTab("home"); };
+  const signOut = () => { saveSession(null); setMe(null); setAdmin(false); setTab("home"); };
 
   const predict = (fid, p) => { setMyPreds((prev) => ({ ...prev, [fid]: p })); setDirty(true); };
   const savePicks = async () => {
@@ -2136,6 +2169,13 @@ export default function App() {
               FULL <span style={{ color: T.volt }}>TIME</span>
             </h1>
             <Pill>{config.goalScoring ? "Goal scoring on" : "Outcome only"}</Pill>
+            <span title={sync.detail || (sync.state === "ok" ? "Synced to the cloud" : "")}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase",
+                color: sync.state === "ok" ? T.volt : sync.state === "down" ? T.pink : T.dim,
+                border: `1px solid ${sync.state === "ok" ? T.volt : sync.state === "down" ? T.pink : T.line}44`, borderRadius: 999, padding: "3px 10px", cursor: sync.detail ? "help" : "default" }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: sync.state === "ok" ? T.volt : sync.state === "down" ? T.pink : T.dim }} />
+              {sync.state === "ok" ? "Cloud synced" : sync.state === "down" ? "Local only" : "Checking…"}
+            </span>
             <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 13, color: T.dim, display: "inline-flex", alignItems: "center", gap: 6 }}><ClubRow clubs={me.clubs} size={20} />{me.name}</span>
               {me.u === ADMIN_USERNAME && (
