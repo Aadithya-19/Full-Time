@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { Trophy, Shield, Settings, LogOut, Lock, Check, X, Plus, Trash2, RefreshCw, Star, Users, Zap, Home, KeyRound, Eye, EyeOff } from "lucide-react";
+import { Trophy, Shield, Settings, LogOut, Lock, Check, X, Plus, Trash2, RefreshCw, Star, Users, Zap, Home, KeyRound, Eye, EyeOff, Award } from "lucide-react";
 
 /* ================= THEME ================= */
 const T = {
@@ -1186,7 +1186,8 @@ const SEED_LIGA = buildSeed(SEED_LIGA_RAW, "LIGA", TEAMS_LIGA, "liga");
 const SEED_FIXTURES = [...SEED_PL, ...SEED_BUN, ...SEED_LIGA];
 
 const KO_ROUNDS = ["R16", "QF", "SF", "F"];
-const ROUND_NAMES = { GS: "League phase", R16: "Round of 16", QF: "Quarter-finals", SF: "Semi-finals", F: "Final" };
+const FAC_ROUNDS = ["R3", "R4", "R5", "QF", "SF", "F"];
+const ROUND_NAMES = { GS: "League phase", R16: "Round of 16", R3: "Round 3", R4: "Round 4", R5: "Round 5", QF: "Quarter-finals", SF: "Semi-finals", F: "Final" };
 
 /* ================= SCORING =================
    +5 correct outcome · +0.5 per correct team goal count · −1 per wrong one
@@ -1218,46 +1219,38 @@ function computeStats(preds, fixtures, goalScoring) {
 
 /* ================= STORAGE + HASH =================
    Two-tier persistence:
-   1) Firestore (Google Cloud) — the durable, shared, cross-device store. Reached over its plain
-      REST API (no SDK import, since artifacts/standalone bundles can't pull in the Firebase SDK).
-   2) Built-in artifact storage (window.storage) — a local cache + fallback used only when Firestore
-      is unreachable. Outside the Claude.ai artifact environment window.storage doesn't exist at all,
-      which is fine: every call to it is wrapped in try/catch, so it silently no-ops and Firestore
-      alone carries the app when this is hosted as a standalone site. */
-const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyCz1E73gjVmoUbHgk-QL-I40I_bDFHWcYE",
-  projectId: "bracket-proj",
-};
-const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${FIREBASE_CONFIG.projectId}/databases/(default)/documents`;
-
-function fsCollection(shared) { return shared ? "ftl_shared" : "ftl_private"; }
+   1) Firestore (Google Cloud) — the durable, shared, cross-device store. The browser never talks
+      to Firestore or holds any API key — it calls this app's own `/api/db` serverless function
+      (see /api/db.js), which holds the Firebase key as a server-side environment variable and
+      proxies the request. Nothing Firebase-related ships in the client bundle or the repo.
+   2) Built-in artifact storage (window.storage) — a local cache + fallback used only when the
+      proxy is unreachable (e.g. running as a Claude.ai artifact preview with no /api routes, or
+      offline). Every call to it is wrapped in try/catch, so it silently no-ops when unavailable. */
 async function fsGet(key, shared) {
   try {
-    const res = await fetch(`${FIRESTORE_BASE}/${fsCollection(shared)}/${encodeURIComponent(key)}?key=${FIREBASE_CONFIG.apiKey}`);
-    if (!res.ok) return undefined; // 404 = doc doesn't exist yet, anything else = treat as unreachable
-    const doc = await res.json();
-    const raw = doc?.fields?.data?.stringValue;
-    return raw === undefined ? undefined : JSON.parse(raw);
-  } catch { return undefined; }
+    const res = await fetch(`/api/db?action=get&shared=${shared ? "true" : "false"}&key=${encodeURIComponent(key)}`);
+    if (!res.ok) return undefined;
+    const { value } = await res.json();
+    return value == null ? undefined : JSON.parse(value);
+  } catch { return undefined; } // no /api route reachable (e.g. artifact preview) — caller falls back to window.storage
 }
 async function fsSet(key, val, shared) {
   try {
-    const body = { fields: { data: { stringValue: JSON.stringify(val) } } };
-    const res = await fetch(
-      `${FIRESTORE_BASE}/${fsCollection(shared)}/${encodeURIComponent(key)}?key=${FIREBASE_CONFIG.apiKey}&updateMask.fieldPaths=data`,
-      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
-    );
-    return res.ok;
+    const res = await fetch(`/api/db`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shared: !!shared, key, value: val }),
+    });
+    if (!res.ok) return false;
+    const d = await res.json();
+    return !!d.ok;
   } catch { return false; }
 }
 async function fsListKeys(prefix, shared) {
   try {
-    const res = await fetch(`${FIRESTORE_BASE}/${fsCollection(shared)}?key=${FIREBASE_CONFIG.apiKey}&pageSize=300`);
+    const res = await fetch(`/api/db?action=list&shared=${shared ? "true" : "false"}&prefix=${encodeURIComponent(prefix || "")}`);
     if (!res.ok) return undefined;
-    const data = await res.json();
-    return (data.documents || [])
-      .map((d) => decodeURIComponent(d.name.split("/").pop()))
-      .filter((k) => !prefix || k.startsWith(prefix));
+    const { keys } = await res.json();
+    return keys;
   } catch { return undefined; }
 }
 
@@ -1754,27 +1747,54 @@ function UclView({ fixtures, preds, onPredict, goalScoring, knockoutsOpen }) {
       )}
 
       {sub === "ko" && knockoutsOpen && (
-        <div style={{ overflowX: "auto", paddingBottom: 8 }}>
-          <div style={{ display: "flex", gap: 0, minWidth: 900 }}>
-            {KO_ROUNDS.map((r, ci) => {
-              const ties = ko.filter((f) => f.round === r).sort((a, b) => (a.slot || 0) - (b.slot || 0));
-              return (
-                <div key={r} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-around", padding: "0 10px", borderLeft: ci > 0 ? `1px dashed ${T.line}` : "none", minHeight: 560 }}>
-                  <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 12, letterSpacing: "0.12em", textTransform: "uppercase", color: r === "F" ? T.gold : T.dim, textAlign: "center", margin: "0 0 4px" }}>{ROUND_NAMES[r]}</h3>
-                  {ties.length === 0 && <p style={{ color: T.line, fontSize: 12, textAlign: "center" }}>TBD</p>}
-                  {ties.map((f) => (
-                    <div key={f.id} style={{ margin: "8px 0" }}>
-                      <FixtureCard fx={f} pred={preds[f.id]} onPredict={(p) => onPredict(f.id, p)} goalScoring={goalScoring} />
-                    </div>
-                  ))}
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        <BracketRounds fixtures={ko} preds={preds} onPredict={onPredict} goalScoring={goalScoring} rounds={KO_ROUNDS} />
       )}
     </div>
   );
+}
+
+/* Shared knockout-bracket renderer — used by UCL knockouts and the FA Cup */
+function BracketRounds({ fixtures, preds, onPredict, goalScoring, rounds }) {
+  return (
+    <div style={{ overflowX: "auto", paddingBottom: 8 }}>
+      <div style={{ display: "flex", gap: 0, minWidth: Math.max(900, rounds.length * 230) }}>
+        {rounds.map((r, ci) => {
+          const ties = fixtures.filter((f) => f.round === r).sort((a, b) => (a.slot || 0) - (b.slot || 0));
+          return (
+            <div key={r} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-around", padding: "0 10px", borderLeft: ci > 0 ? `1px dashed ${T.line}` : "none", minHeight: 480 }}>
+              <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 12, letterSpacing: "0.12em", textTransform: "uppercase", color: r === "F" ? T.gold : T.dim, textAlign: "center", margin: "0 0 4px" }}>{ROUND_NAMES[r] || r}</h3>
+              {ties.length === 0 && <p style={{ color: T.line, fontSize: 12, textAlign: "center" }}>TBD</p>}
+              {ties.map((f) => (
+                <div key={f.id} style={{ margin: "8px 0" }}>
+                  <FixtureCard fx={f} pred={preds[f.id]} onPredict={(p) => onPredict(f.id, p)} goalScoring={goalScoring} />
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ================= FA CUP (knockout only, Round 3 onward) ================= */
+function FaCupView({ fixtures, preds, onPredict, goalScoring, open }) {
+  const fac = fixtures.filter((f) => f.comp === "FAC");
+  if (!open) return (
+    <div style={{ background: T.card, border: `1px dashed ${T.line}`, borderRadius: 16, padding: 40, textAlign: "center" }}>
+      <Award size={28} color={T.dim} style={{ marginBottom: 10 }} />
+      <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", margin: "0 0 6px" }}>FA Cup</h3>
+      <p style={{ color: T.dim, fontSize: 14, margin: 0 }}>The admin hasn't opened this competition yet.</p>
+    </div>
+  );
+  if (fac.length === 0) return (
+    <div style={{ background: T.card, border: `1px dashed ${T.line}`, borderRadius: 16, padding: 40, textAlign: "center" }}>
+      <Award size={28} color={T.dim} style={{ marginBottom: 10 }} />
+      <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", margin: "0 0 6px" }}>FA Cup</h3>
+      <p style={{ color: T.dim, fontSize: 14, margin: 0 }}>No fixtures yet — the admin adds each round from Round 3 onward as the draw lands.</p>
+    </div>
+  );
+  return <BracketRounds fixtures={fac} preds={preds} onPredict={onPredict} goalScoring={goalScoring} rounds={FAC_ROUNDS} />;
 }
 
 /* ================= ADMIN DESK ================= */
@@ -1829,8 +1849,8 @@ function AdminDesk({ config, setConfig, fixtures, setFixtures, players, allPreds
     if (!nf.home || !nf.away || nf.home === nf.away || !nf.kickoff) return;
     const fx = {
       id: `${nf.comp.toLowerCase()}-${Date.now()}`, comp: nf.comp,
-      week: nf.comp === "PL" ? +nf.week : null,
-      round: nf.comp === "UCL" ? nf.round : null,
+      week: (nf.comp === "PL" || nf.comp === "BUN" || nf.comp === "LIGA") ? +nf.week : null,
+      round: (nf.comp === "UCL" || nf.comp === "FAC") ? nf.round : null,
       md: nf.comp === "UCL" && nf.round === "GS" ? +nf.md : null,
       home: nf.home, away: nf.away, kickoff: new Date(nf.kickoff).toISOString(), tba: false, result: null, final: false,
     };
@@ -1848,7 +1868,7 @@ function AdminDesk({ config, setConfig, fixtures, setFixtures, players, allPreds
 
   const weeks = [...new Set(fixtures.filter((f) => f.comp === comp).map((f) => f.week))].sort((a, b) => a - b);
   const shown = fixtures
-    .filter((f) => f.comp === comp && (comp === "UCL" || f.week === week))
+    .filter((f) => f.comp === comp && (comp === "UCL" || comp === "FAC" || f.week === week))
     .sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
 
   const toggleRow = (label, desc, on, onClick, onLabel, offLabel) => (
@@ -1873,9 +1893,9 @@ function AdminDesk({ config, setConfig, fixtures, setFixtures, players, allPreds
         <>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <select value={comp} onChange={(e) => { setComp(e.target.value); setWeek(1); }} style={inputStyle}>
-              <option value="PL">Premier League</option><option value="BUN">Bundesliga</option><option value="LIGA">La Liga</option><option value="UCL">Champions League</option>
+              <option value="PL">Premier League</option><option value="BUN">Bundesliga</option><option value="LIGA">La Liga</option><option value="UCL">Champions League</option><option value="FAC">FA Cup</option>
             </select>
-            {comp !== "UCL" && (
+            {comp !== "UCL" && comp !== "FAC" && (
               <select value={week} onChange={(e) => setWeek(+e.target.value)} style={inputStyle}>
                 {weeks.map((w) => <option key={w} value={w}>Matchweek {w}</option>)}
               </select>
@@ -1885,7 +1905,7 @@ function AdminDesk({ config, setConfig, fixtures, setFixtures, players, allPreds
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {shown.map((f) => (
               <div key={f.id} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 12, padding: "12px 16px", display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
-                <Pill>{f.comp === "PL" ? `MW ${f.week}` : f.round === "GS" ? `MD ${f.md || 1}` : ROUND_NAMES[f.round]}</Pill>
+                <Pill>{f.round ? (f.round === "GS" ? `MD ${f.md || 1}` : ROUND_NAMES[f.round]) : `MW ${f.week}`}</Pill>
                 <span style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 220, fontSize: 14, fontWeight: 600 }}>
                   <Crest team={f.home} size={22} />{f.home} <span style={{ color: T.dim }}>v</span> {f.away}<Crest team={f.away} size={22} />
                 </span>
@@ -1906,18 +1926,25 @@ function AdminDesk({ config, setConfig, fixtures, setFixtures, players, allPreds
         <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16, padding: 20 }}>
           <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", margin: "0 0 12px", fontSize: 16 }}>New fixture</h3>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
-            <select value={nf.comp} onChange={(e) => setNf({ ...nf, comp: e.target.value })} style={inputStyle}>
-              <option value="PL">Premier League</option><option value="BUN">Bundesliga</option><option value="LIGA">La Liga</option><option value="UCL">Champions League</option>
+            <select value={nf.comp} onChange={(e) => {
+              const c = e.target.value;
+              setNf({ ...nf, comp: c, round: c === "FAC" ? "R3" : c === "UCL" ? "GS" : nf.round });
+            }} style={inputStyle}>
+              <option value="PL">Premier League</option><option value="BUN">Bundesliga</option><option value="LIGA">La Liga</option><option value="UCL">Champions League</option><option value="FAC">FA Cup</option>
             </select>
-            {nf.comp !== "UCL" ? (
-              <input type="number" min="1" max="38" value={nf.week} onChange={(e) => setNf({ ...nf, week: e.target.value })} style={{ ...inputStyle, width: 76 }} placeholder="MW" />
-            ) : (
+            {nf.comp === "UCL" ? (
               <>
                 <select value={nf.round} onChange={(e) => setNf({ ...nf, round: e.target.value })} style={inputStyle}>
                   {["GS", ...KO_ROUNDS].map((r) => <option key={r} value={r}>{ROUND_NAMES[r]}</option>)}
                 </select>
                 {nf.round === "GS" && <input type="number" min="1" max="8" value={nf.md} onChange={(e) => setNf({ ...nf, md: e.target.value })} style={{ ...inputStyle, width: 76 }} placeholder="MD" />}
               </>
+            ) : nf.comp === "FAC" ? (
+              <select value={nf.round} onChange={(e) => setNf({ ...nf, round: e.target.value })} style={inputStyle}>
+                {FAC_ROUNDS.map((r) => <option key={r} value={r}>{ROUND_NAMES[r]}</option>)}
+              </select>
+            ) : (
+              <input type="number" min="1" max="38" value={nf.week} onChange={(e) => setNf({ ...nf, week: e.target.value })} style={{ ...inputStyle, width: 76 }} placeholder="MW" />
             )}
             <select value={nf.home} onChange={(e) => setNf({ ...nf, home: e.target.value })} style={inputStyle}>
               <option value="">Home team…</option>{teamList.map((t) => <option key={t}>{t}</option>)}
@@ -1942,6 +1969,9 @@ function AdminDesk({ config, setConfig, fixtures, setFixtures, players, allPreds
           {toggleRow("UCL knockout bracket",
             "Reveal the March-madness-style knockout page once the Round of 16 draw is made.",
             config.knockoutsOpen, () => setCfg({ knockoutsOpen: !config.knockoutsOpen }), "Knockouts VISIBLE", "Knockouts HIDDEN")}
+          {toggleRow("FA Cup",
+            "Reveal the FA Cup tab (Round 3 onward) once you've added the Round 3 draw under Add fixtures.",
+            config.faCupOpen, () => setCfg({ faCupOpen: !config.faCupOpen }), "FA Cup VISIBLE", "FA Cup HIDDEN")}
           <div style={{ paddingTop: 14, borderTop: `1px solid ${T.line}` }}>
             <p style={{ margin: "0 0 2px", fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}><KeyRound size={14} />Change admin PIN</p>
             <p style={{ margin: "0 0 10px", fontSize: 12, color: T.dim }}>The PIN is stored hashed and never shown anywhere in the app.</p>
@@ -1981,7 +2011,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [me, setMe] = useState(null);
   const [players, setPlayers] = useState([]);
-  const [config, setConfig] = useState({ goalScoring: true, knockoutsOpen: false, adminPinHash: null });
+  const [config, setConfig] = useState({ goalScoring: true, knockoutsOpen: false, faCupOpen: false, adminPinHash: null });
   const [fixtures, setFixtures] = useState([]);
   const [myPreds, setMyPreds] = useState({});
   const [allPreds, setAllPreds] = useState({});
@@ -2009,7 +2039,8 @@ export default function App() {
       sget("plp2:fixtures", true, null),
       sget("plp2:players", true, []),
     ]);
-    const c = cfg || { goalScoring: true, knockoutsOpen: false, adminPinHash: null };
+    const c = cfg || { goalScoring: true, knockoutsOpen: false, faCupOpen: false, adminPinHash: null };
+    if (cfg && c.faCupOpen === undefined) c.faCupOpen = false; // migrate older saved configs
     setConfig(c); if (!cfg) await sset("plp2:config", c, true);
     let fxArr = fx || SEED_FIXTURES;
     let changed = !fx;
@@ -2022,7 +2053,7 @@ export default function App() {
     if (!players.some((p) => p.u === ADMIN_USERNAME)) {
       const rec = {
         u: ADMIN_USERNAME, name: "Aadithya", hash: await hash("ChelseaLion"),
-        clubs: { PL: "Chelsea", BUN: "Dortmund", LIGA: "Barcelona", UCL: "Barcelona" },
+        clubs: { PL: "Chelsea", BUN: "Bayern Munich", LIGA: "Real Madrid", UCL: "AC Milan" },
         joined: Date.now(),
       };
       players = [...players, rec];
@@ -2115,7 +2146,7 @@ export default function App() {
           </header>
 
           <nav style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
-            {[["home", "Home", Home], ["predict", "My picks", Shield], ["board", "Leaderboard", Trophy], ["table", "Tables", null], ["ucl", "UCL", Zap], ...(admin ? [["admin", "Admin desk", Settings]] : [])].map(([k, l, Icon]) => (
+            {[["home", "Home", Home], ["predict", "My picks", Shield], ["board", "Leaderboard", Trophy], ["table", "Tables", null], ["ucl", "UCL", Zap], ["facup", "FA Cup", Award], ...(admin ? [["admin", "Admin desk", Settings]] : [])].map(([k, l, Icon]) => (
               <button key={k} onClick={() => setTab(k)}
                 style={{ ...btn(tab === k), padding: "9px 16px", display: "flex", alignItems: "center", gap: 6, ...(k === "admin" && tab !== k ? { color: T.pink, borderColor: T.pink + "55" } : {}) }}>
                 {Icon && <Icon size={14} />}{l}
@@ -2155,6 +2186,7 @@ export default function App() {
             </>
           )}
           {tab === "ucl" && <UclView fixtures={fixtures} preds={myPreds} onPredict={predict} goalScoring={config.goalScoring} knockoutsOpen={config.knockoutsOpen || admin} />}
+          {tab === "facup" && <FaCupView fixtures={fixtures} preds={myPreds} onPredict={predict} goalScoring={config.goalScoring} open={config.faCupOpen || admin} />}
           {tab === "admin" && admin && <AdminDesk config={config} setConfig={setConfig} fixtures={fixtures} setFixtures={setFixtures} players={players} allPreds={mergedPreds} />}
 
           {pinOpen && (
