@@ -2022,7 +2022,7 @@ export default function App() {
     if (!players.some((p) => p.u === ADMIN_USERNAME)) {
       const rec = {
         u: ADMIN_USERNAME, name: "Aadithya", hash: await hash("ChelseaLion"),
-        clubs: { PL: "Chelsea", BUN: "Bayern Munich", LIGA: "Barcelona", UCL: "Barcelona" },
+        clubs: { PL: "Chelsea", BUN: "Dortmund", LIGA: "Barcelona", UCL: "Barcelona" },
         joined: Date.now(),
       };
       players = [...players, rec];
